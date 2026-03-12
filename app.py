@@ -2,217 +2,342 @@ import streamlit as st
 import pandas as pd
 import plotly.express as px
 
-st.set_page_config(page_title="Rapha Google Ads Dashboard", layout="wide")
+st.set_page_config(page_title="Rapha Ads Intelligence", layout="wide")
 
-st.title("🚀 Rapha | Google Ads Campaign Intelligence Dashboard")
+px.defaults.template = "plotly_white"
 
-# ----------------------------
+st.title("Rapha | Google Ads Product Intelligence Dashboard")
+
+# --------------------------------------------------
 # LOAD DATA
-# ----------------------------
+# --------------------------------------------------
 
 @st.cache_data
 def load_data():
-    df = pd.read_csv("Rapha_google_ads_campaign_daily.csv", skiprows=3)
+    df = pd.read_csv("rapha_campaign_clean.csv")
 
-    df.columns = df.columns.str.strip()
+    numeric_cols = ["cost","clicks","impr","conversions","conv_value"]
 
-    num_cols = ["Cost", "Clicks", "Impr.", "Conversions", "Conv. value"]
-    for c in num_cols:
-        df[c] = df[c].astype(str).str.replace(",", "").astype(float)
+    for col in numeric_cols:
+        if col in df.columns:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
 
-    df["Day"] = pd.to_datetime(df["Day"])
+    possible_dates = ["day","Day","date","Date"]
+    date_col = None
+
+    for col in possible_dates:
+        if col in df.columns:
+            date_col = col
+            break
+
+    if date_col:
+        df = df.rename(columns={date_col:"day"})
+        df["day"] = pd.to_datetime(df["day"], errors="coerce")
+    else:
+        df["day"] = pd.date_range(
+            start="2024-01-01",
+            periods=len(df),
+            freq="D"
+        )
 
     return df
 
+
 df = load_data()
 
-# ----------------------------
+# --------------------------------------------------
 # SIDEBAR FILTERS
-# ----------------------------
+# --------------------------------------------------
 
-st.sidebar.header("Dashboard Filters")
-
-date_range = st.sidebar.date_input(
-    "Select Date Range",
-    [df["Day"].min(), df["Day"].max()]
-)
+st.sidebar.header("Global Filters")
 
 campaign_filter = st.sidebar.multiselect(
-    "Select Campaign",
-    options=df["Campaign"].unique(),
-    default=df["Campaign"].unique()
+    "Campaign",
+    options=sorted(df["campaign"].dropna().unique()),
+    default=list(df["campaign"].dropna().unique())
 )
 
-filtered = df[
-    (df["Campaign"].isin(campaign_filter)) &
-    (df["Day"] >= pd.to_datetime(date_range[0])) &
-    (df["Day"] <= pd.to_datetime(date_range[1]))
-]
+filtered = df[df["campaign"].isin(campaign_filter)]
 
-# ----------------------------
-# KPI CARDS
-# ----------------------------
+# --------------------------------------------------
+# PRODUCT DATASET
+# --------------------------------------------------
 
-total_cost = filtered["Cost"].sum()
-total_revenue = filtered["Conv. value"].sum()
-total_conv = filtered["Conversions"].sum()
-total_clicks = filtered["Clicks"].sum()
-total_impr = filtered["Impr."].sum()
-
-roas = total_revenue / total_cost if total_cost > 0 else 0
-ctr = total_clicks / total_impr if total_impr > 0 else 0
-cpc = total_cost / total_clicks if total_clicks > 0 else 0
-
-c1, c2, c3, c4, c5, c6 = st.columns(6)
-
-c1.metric("Spend", f"£{total_cost:,.0f}")
-c2.metric("Revenue", f"£{total_revenue:,.0f}")
-c3.metric("Conversions", f"{total_conv:,.0f}")
-c4.metric("ROAS", f"{roas:.2f}")
-c5.metric("CTR", f"{ctr:.2%}")
-c6.metric("CPC", f"£{cpc:.2f}")
-
-st.divider()
-
-# ----------------------------
-# CAMPAIGN PERFORMANCE
-# ----------------------------
-
-st.header("Campaign Performance")
-
-campaign_perf = (
-    filtered.groupby("Campaign")
+product_perf = (
+    filtered
+    .groupby("product_title", dropna=False)
     .agg(
-        Spend=("Cost", "sum"),
-        Revenue=("Conv. value", "sum"),
-        Conversions=("Conversions", "sum"),
-        Clicks=("Clicks", "sum"),
-        Impressions=("Impr.", "sum")
+        Spend=("cost","sum"),
+        Revenue=("conv_value","sum"),
+        Conversions=("conversions","sum"),
+        Clicks=("clicks","sum"),
+        Impressions=("impr","sum")
     )
     .reset_index()
 )
 
-campaign_perf["ROAS"] = campaign_perf["Revenue"] / campaign_perf["Spend"]
-campaign_perf["CTR"] = campaign_perf["Clicks"] / campaign_perf["Impressions"]
-campaign_perf["CPC"] = campaign_perf["Spend"] / campaign_perf["Clicks"]
+product_perf["ROAS"] = product_perf["Revenue"] / product_perf["Spend"]
+product_perf["AOV"] = product_perf["Revenue"] / product_perf["Conversions"]
 
-# Top spend campaigns
+product_perf["Cost Share"] = product_perf["Spend"] / product_perf["Spend"].sum()
+product_perf["Revenue Share"] = product_perf["Revenue"] / product_perf["Revenue"].sum()
 
-top_campaigns = campaign_perf.sort_values("Spend", ascending=False).head(10)
-
-fig = px.bar(
-    top_campaigns,
-    y="Campaign",
-    x="Spend",
-    orientation="h",
-    title="Top Campaigns by Spend"
+product_perf["Efficiency Ratio"] = (
+    product_perf["Cost Share"] / product_perf["Revenue Share"]
 )
 
-st.plotly_chart(fig, use_container_width=True)
+product_perf.replace([float("inf"), -float("inf")], 0, inplace=True)
+product_perf.fillna(0, inplace=True)
 
-st.subheader("Campaign Performance Table")
+# --------------------------------------------------
+# TABS
+# --------------------------------------------------
 
-st.dataframe(
-    campaign_perf.sort_values("Revenue", ascending=False),
-    use_container_width=True
-)
+tab1, tab2, tab3, tab4 = st.tabs([
+    "Overview",
+    "Product Breakdown",
+    "Campaign Analysis",
+    "Budget Engine"
+])
 
-st.divider()
+# --------------------------------------------------
+# TAB 1 - OVERVIEW
+# --------------------------------------------------
 
-# ----------------------------
-# DAILY PERFORMANCE TREND
-# ----------------------------
+with tab1:
 
-st.header("Daily Spend vs Revenue")
+    total_spend = filtered["cost"].sum()
+    total_rev = filtered["conv_value"].sum()
+    total_conv = filtered["conversions"].sum()
+    total_clicks = filtered["clicks"].sum()
+    total_impr = filtered["impr"].sum()
 
-daily = (
-    filtered.groupby("Day")
-    .agg(
-        Spend=("Cost", "sum"),
-        Revenue=("Conv. value", "sum"),
-        Clicks=("Clicks", "sum"),
-        Impressions=("Impr.", "sum")
+    roas = total_rev / total_spend if total_spend else 0
+    ctr = total_clicks / total_impr if total_impr else 0
+    cpc = total_spend / total_clicks if total_clicks else 0
+
+    c1,c2,c3,c4,c5,c6 = st.columns(6)
+
+    c1.metric("Spend", f"{total_spend:,.0f}")
+    c2.metric("Revenue", f"{total_rev:,.0f}")
+    c3.metric("Conversions", f"{total_conv:,.0f}")
+    c4.metric("ROAS", f"{roas:.2f}")
+    c5.metric("CTR", f"{ctr:.2%}")
+    c6.metric("CPC", f"{cpc:.2f}")
+
+    st.divider()
+
+    st.subheader("Daily Performance Trends")
+
+    daily = (
+        filtered
+        .groupby("day")
+        .agg(
+            Spend=("cost","sum"),
+            Revenue=("conv_value","sum")
+        )
+        .reset_index()
     )
-    .reset_index()
-)
 
-daily["ROAS"] = daily["Revenue"] / daily["Spend"]
+    daily["ROAS"] = daily["Revenue"] / daily["Spend"]
 
-fig2 = px.line(
-    daily,
-    x="Day",
-    y=["Spend", "Revenue"],
-    title="Spend vs Revenue Over Time"
-)
+    metric_selector = st.multiselect(
+        "Select Metrics",
+        ["Spend","Revenue","ROAS"],
+        default=["Spend","Revenue"]
+    )
 
-st.plotly_chart(fig2, use_container_width=True)
+    fig = px.line(
+        daily,
+        x="day",
+        y=metric_selector,
+        markers=True
+    )
 
-# ----------------------------
-# ROAS TREND
-# ----------------------------
+    fig.update_layout(height=500)
 
-st.header("ROAS Trend")
+    st.plotly_chart(fig, use_container_width=True)
 
-fig_roas = px.line(
-    daily,
-    x="Day",
-    y="ROAS",
-    title="Return on Ad Spend Over Time"
-)
+# --------------------------------------------------
+# TAB 2 - PRODUCT BREAKDOWN
+# --------------------------------------------------
 
-st.plotly_chart(fig_roas, use_container_width=True)
+with tab2:
 
-# ----------------------------
-# SCALING EFFICIENCY METRIC
-# ----------------------------
+    st.subheader("Product Performance Insights")
 
-daily["Spend Change"] = daily["Spend"].diff()
-daily["Revenue Change"] = daily["Revenue"].diff()
+    top_rev = product_perf.sort_values("Revenue",ascending=False).iloc[0]
+    top_spend = product_perf.sort_values("Spend",ascending=False).iloc[0]
+    top_roas = product_perf.sort_values("ROAS",ascending=False).iloc[0]
 
-daily["Delta Efficiency"] = daily["Revenue Change"] / daily["Spend Change"]
+    c1,c2,c3 = st.columns(3)
 
-latest_delta = daily["Delta Efficiency"].iloc[-1]
+    c1.metric("Top Revenue Product", f"{top_rev['Revenue']:,.0f}", top_rev["product_title"])
+    c2.metric("Highest Spend Product", f"{top_spend['Spend']:,.0f}", top_spend["product_title"])
+    c3.metric("Best ROAS Product", f"{top_roas['ROAS']:.2f}x", top_roas["product_title"])
 
-st.subheader("Scaling Efficiency")
+    st.divider()
 
-st.metric(
-    "Revenue vs Spend Delta",
-    f"{latest_delta:.2f}"
-)
+    col1, col2, col3, col4 = st.columns(4)
 
-# ----------------------------
-# CAMPAIGN EFFICIENCY MAP
-# ----------------------------
+    with col1:
+        product_search = st.text_input("Search Product")
 
-st.header("Campaign Efficiency Map")
+    with col2:
+        min_spend = st.number_input("Min Spend", value=0.0)
 
-fig3 = px.scatter(
-    campaign_perf,
-    x="Spend",
-    y="Revenue",
-    size="Conversions",
-    color="ROAS",
-    hover_name="Campaign",
-    title="Campaign Efficiency"
-)
+    with col3:
+        min_aov = st.number_input("Min AOV", value=0.0)
 
-st.plotly_chart(fig3, use_container_width=True)
+    with col4:
+        show_all = st.checkbox("Show All Products", value=False)
 
-# ----------------------------
-# BEST & WORST CAMPAIGNS
-# ----------------------------
+    metric_selector = st.multiselect(
+        "Metrics to Visualize",
+        ["Revenue","Spend","ROAS","Conversions"],
+        default=["Revenue"]
+    )
 
-st.header("Performance Diagnostics")
+    filtered_products = product_perf.copy()
 
-best = campaign_perf.sort_values("ROAS", ascending=False).head(5)
-worst = campaign_perf.sort_values("ROAS", ascending=True).head(5)
+    if product_search:
+        filtered_products = filtered_products[
+            filtered_products["product_title"].str.contains(product_search, case=False, na=False)
+        ]
 
-col1, col2 = st.columns(2)
+    filtered_products = filtered_products[
+        filtered_products["Spend"] >= min_spend
+    ]
 
-with col1:
-    st.subheader("Top ROAS Campaigns")
-    st.dataframe(best)
+    filtered_products = filtered_products[
+        filtered_products["AOV"] >= min_aov
+    ]
 
-with col2:
-    st.subheader("Lowest ROAS Campaigns")
-    st.dataframe(worst)
+    if not show_all:
+        filtered_products = filtered_products.sort_values("Spend",ascending=False).head(50)
+
+    fig = px.bar(
+        filtered_products.head(10),
+        x="product_title",
+        y=metric_selector,
+        barmode="group"
+    )
+
+    fig.update_layout(height=500)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("ROAS vs Spend")
+
+    fig = px.scatter(
+        filtered_products,
+        x="Spend",
+        y="ROAS",
+        size="Revenue",
+        hover_name="product_title",
+        color="Efficiency Ratio"
+    )
+
+    fig.add_hline(y=2)
+    fig.add_vline(x=filtered_products["Spend"].median())
+
+    fig.update_layout(height=600)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.subheader("Product Performance Table")
+
+    st.dataframe(filtered_products, use_container_width=True)
+
+# --------------------------------------------------
+# TAB 3 - CAMPAIGN ANALYSIS
+# --------------------------------------------------
+
+with tab3:
+
+    st.subheader("Campaign Performance")
+
+    campaign_perf = (
+        filtered
+        .groupby("campaign")
+        .agg(
+            Spend=("cost","sum"),
+            Revenue=("conv_value","sum"),
+            Conversions=("conversions","sum")
+        )
+        .reset_index()
+    )
+
+    campaign_perf["ROAS"] = campaign_perf["Revenue"] / campaign_perf["Spend"]
+
+    fig = px.bar(
+        campaign_perf.sort_values("Spend", ascending=False),
+        x="Spend",
+        y="campaign",
+        orientation="h"
+    )
+
+    fig.update_layout(height=500)
+
+    st.plotly_chart(fig, use_container_width=True)
+
+    st.dataframe(campaign_perf.sort_values("Revenue", ascending=False), use_container_width=True)
+
+# --------------------------------------------------
+# TAB 4 - BUDGET ENGINE
+# --------------------------------------------------
+
+with tab4:
+
+    st.subheader("Budget Reallocation Engine")
+
+    col1,col2 = st.columns(2)
+
+    with col1:
+        min_roas = st.slider("Minimum ROAS",0.0,10.0,0.0)
+
+    with col2:
+        max_ratio = st.slider("Max Efficiency Ratio",0.0,3.0,3.0)
+
+    filtered_budget = product_perf[
+        (product_perf["ROAS"] >= min_roas) &
+        (product_perf["Efficiency Ratio"] <= max_ratio)
+    ]
+
+    def recommendation(row):
+
+        roas = row["ROAS"]
+        ratio = row["Efficiency Ratio"]
+
+        if roas > 4 and ratio < 0.8:
+            return "Scale"
+
+        if roas > 3 and ratio < 1:
+            return "Increase Budget"
+
+        if 1 <= ratio <= 1.2:
+            return "Maintain"
+
+        if ratio > 1.2 and roas < 2:
+            return "Reduce Budget"
+
+        if roas < 1:
+            return "Pause"
+
+        return "Review"
+
+    filtered_budget["Recommendation"] = filtered_budget.apply(recommendation, axis=1)
+
+    st.dataframe(
+        filtered_budget[
+            [
+                "product_title",
+                "Spend",
+                "Revenue",
+                "ROAS",
+                "Efficiency Ratio",
+                "Recommendation"
+            ]
+        ].sort_values("Spend", ascending=False),
+        use_container_width=True
+    )
